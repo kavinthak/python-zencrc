@@ -78,7 +78,11 @@ def test_verify_sfv_file(tmp_path):
 
 
 def test_create_sfv_file(tmp_path):
-    """Test creating SFV files."""
+    """
+    Verify that create_sfv_file writes an SFV file listing the given files with their CRC32 values.
+    
+    Creates a temporary file, computes its CRC32, calls create_sfv_file to generate an SFV at the specified path, and asserts the SFV contains a line with "filename <CRC>" for the file.
+    """
     file1 = tmp_path / "file1.txt"
     file1.write_text("file1")
     crc1 = crc32.crc32_from_file(str(file1))
