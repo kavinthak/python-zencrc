@@ -1,281 +1,190 @@
 import os
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Union, Iterable
+from typing import List, Tuple, Optional
 
 import click
-from zencrc import crc32
-from zencrc import __version__
-from zencrc.error_handler import ErrorHandler
+from rich.console import Console
+from rich.table import Table
+from rich.progress import Progress
 
-# Output styling functions
+from zencrc import crc32, __version__
+
+console = Console()
+
+
+class ErrorHandler:
+    @staticmethod
+    def show_no_files_error():
+        console.print("\n[red]❌ Error: No valid files found to process.[/red]")
+        console.print("\nUse [green]-r[/green] flag to search recursively")
+        console.print(
+            "\nFor more information, run: [blue]zencrc --help[/blue]\n"
+        )
+        raise click.Abort()
+
+    @staticmethod
+    def show_error(message):
+        console.print(f"\n[red]❌ Error: {message}[/red]")
+        raise click.Abort()
+
+
 def print_header(title: str) -> None:
-    """Print a styled header with the given title.
-
-    Args:
-        title: The title to display in the header
-    """
-    click.echo(click.style('\n╒═══════════════════════════════════════════════════════════════════════════╕', fg='blue'))
-    click.echo(click.style('│ ', fg='blue') +
-              click.style(title, fg='green', bold=True) +
-              click.style(' │', fg='blue').rjust(73))
-    click.echo(click.style('╘═══════════════════════════════════════════════════════════════════════════╛', fg='blue'))
-    click.echo()
+    """Prints a styled header."""
+    console.rule(f"[bold green]{title}[/bold green]")
 
 
-def print_table_header(columns: List[Tuple[str, int, bool]]) -> None:
-    """Print a styled table header with the given columns.
-
-    Args:
-        columns: List of tuples containing (name, width, align_right)
-    """
-    header_parts = []
-    for name, width, align_right in columns:
-        if align_right:
-            header_parts.append(f"{click.style(name, bold=True):>{width}}")
-        else:
-            header_parts.append(f"{click.style(name, bold=True):<{width}}")
-
-    click.echo(' '.join(header_parts))
-    click.echo("─" * 80)
-
-
-def print_footer(processed: int, item_type: str = "files") -> None:
-    """Print a styled footer with the number of processed items.
-
-    Args:
-        processed: Number of processed items
-        item_type: Type of items processed (default: "files")
-    """
-    if processed > 0:
-        click.echo("─" * 80)
-        click.echo(click.style(f"Processed {processed} {item_type}", fg='blue'))
-
-
-def expand_dirs(dirlist: Iterable[str]) -> List[str]:
-    """Expand directories in the list to include all files recursively.
-
-    Args:
-        dirlist: List of file and directory paths
-
-    Returns:
-        List of file paths with directories expanded
-    """
-    master_filelist = []
-    for path_str in dirlist:
-        path = Path(path_str)
-        if path.is_dir():
-            for root, _, files in os.walk(str(path)):
-                root_path = Path(root)
-                # Add files in batches rather than one by one
-                master_filelist.extend(str(root_path / file) for file in files)
-        else:
-            master_filelist.append(path_str)
-    return master_filelist
-
-
-def process_verify_mode(filelist: List[str]) -> None:
-    """Process files in verify mode.
-
-    Args:
-        filelist: List of files to process
-    """
-    try:
-        print_header('VERIFY MODE')
-
-        # Print header with better formatting
-        print_table_header([
-            ('Filename', 40, False),
-            ('Size', 10, True),
-            ('Status', 15, False),
-            ('CRC32', 10, False)
-        ])
-
-        # Process files
-        processed = 0
-        for filepath in filelist:
-            path = Path(filepath)
-            if path.is_dir():
-                continue
-            crc32.verify_in_filename(filepath)
-            processed += 1
-
-        # Print summary footer
-        print_footer(processed)
-    except FileNotFoundError as err:
-        click.echo(click.style(str(err), fg='red'))
-
-
-def process_append_mode(filelist: List[str]) -> None:
-    """Process files in append mode.
-
-    Args:
-        filelist: List of files to process
-    """
-    try:
-        print_header('APPEND MODE')
-
-        # Process files
-        processed = 0
-        for filepath in filelist:
-            path = Path(filepath)
-            if path.is_dir():
-                continue
-            crc32.append_to_filename(filepath)
-            processed += 1
-
-        # Print summary footer if files were processed
-        print_footer(processed)
-
-    except FileNotFoundError:
-        pass
-
-
-def process_create_sfv(sfv_filepath: str, filelist: List[str]) -> None:
-    """Create an SFV file.
-
-    Args:
-        sfv_filepath: Path to the SFV file to create
-        filelist: List of files to include in the SFV file
-    """
-    print_header('CREATE SFV')
-    crc32.create_sfv_file(sfv_filepath, filelist)
-
-
-def process_verify_sfv(filelist: List[str]) -> None:
-    """Verify SFV files.
-
-    Args:
-        filelist: List of SFV files to verify
-    """
-    try:
-        print_header('VERIFY SFV')
-
-        # Process files
-        processed = 0
-        for filepath in filelist:
-            crc32.verify_sfv_file(filepath)
-            processed += 1
-
-        # Print summary footer if files were processed
-        print_footer(processed, "SFV files")
-
-    except IsADirectoryError as err:
-        click.echo(click.style(str(err), fg='red'))
-
-
-@click.group()
-def cli():
-    """ZenCRC: CRC32 file utility.
-
-    A command-line tool for working with CRC32 checksums in filenames and SFV files.
-    """
-    pass
-
-@cli.command()
-@click.argument('files', nargs=-1, required=True, type=click.Path())
-@click.option('-r', '--recurse', is_flag=True, help='Run program recursively')
-def verify(files: Tuple[str, ...], recurse: bool) -> None:
-    """Verify CRC32 checksums in filenames"""
-    filelist = list(files)
-
+def expand_and_filter_files(
+    paths: Tuple[str, ...], recurse: bool
+) -> List[Path]:
+    """Expands directories and filters out non-files."""
+    expanded_paths = []
     if recurse:
-        filelist = expand_dirs(filelist)
-
-    filelist = [path for path in filelist if not Path(path).is_dir()]
-
-    if not filelist:
-        ErrorHandler.show_no_files_error()
+        for p in paths:
+            path = Path(p)
+            if path.is_dir():
+                expanded_paths.extend(
+                    sub_path
+                    for sub_path in path.rglob('*')
+                    if sub_path.is_file()
+                )
+            elif path.is_file():
+                expanded_paths.append(path)
     else:
-        process_verify_mode(filelist)
+        expanded_paths = [Path(p) for p in paths if Path(p).is_file()]
+    return expanded_paths
+
+
+def process_files_with_progress(
+    file_paths: List[Path], process_func, description: str
+) -> None:
+    """Processes files with a progress bar."""
+    with Progress(
+        "[progress.description]{task.description}",
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        "•",
+        "[progress.completed]{task.completed} of {task.total}",
+        console=console,
+    ) as progress:
+        task = progress.add_task(description, total=len(file_paths))
+        for path in file_paths:
+            process_func(str(path))
+            progress.update(task, advance=1)
+
+
+def create_results_table(title: str) -> Table:
+    """Creates a table for displaying results."""
+    table = Table(title=title, show_header=True, header_style="bold magenta")
+    table.add_column("Filename", style="dim", width=40)
+    table.add_column("Size", justify="right")
+    table.add_column("Status")
+    table.add_column("CRC32", justify="right")
+    return table
+
+
+@click.group(invoke_without_command=True)
+@click.version_option(version=__version__, prog_name="ZenCRC")
+@click.pass_context
+def cli(ctx):
+    """ZenCRC: A modern CRC32 file utility."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
 
 @cli.command()
-@click.argument('files', nargs=-1, required=True, type=click.Path())
-@click.option('-r', '--recurse', is_flag=True, help='Run program recursively')
-def append(files: Tuple[str, ...], recurse: bool) -> None:
-    """Append CRC32 checksums to filenames"""
-    filelist = list(files)
+@click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("-r", "--recurse", is_flag=True, help="Process files recursively.")
+def verify(paths: Tuple[str, ...], recurse: bool):
+    """Verify CRC32 checksums in filenames."""
+    print_header("VERIFY MODE")
+    file_paths = expand_and_filter_files(paths, recurse)
 
-    if recurse:
-        filelist = expand_dirs(filelist)
-
-    filelist = [path for path in filelist if not Path(path).is_dir()]
-    print(filelist)
-
-    if not filelist:
+    if not file_paths:
         ErrorHandler.show_no_files_error()
-    else:
-        process_append_mode(filelist)
 
-def validate_sfv_params(ctx, param, value):
-    """Validate SFV command parameters."""
-    # Get all parameter values from context
-    params = ctx.params
-    files = params.get('files', ())
-    create = params.get('create')
-    verify = params.get('verify')
-    recurse = params.get('recurse')
+    table = create_results_table("Verification Results")
 
-    # Verify mode validation
-    if verify:
-        if create:
-            ErrorHandler.verify_create_conflict()
-        if recurse:
-            ErrorHandler.recurse_with_verify()
-        if files:
-            ErrorHandler.files_with_verify()
-        if Path(verify).suffix.lower() != '.sfv':
-            ErrorHandler.verify_requires_sfv()
+    with Progress(console=console) as progress:
+        task = progress.add_task("[cyan]Verifying...", total=len(file_paths))
+        for path in file_paths:
+            try:
+                filename_crc, calculated_crc = crc32.verify_in_filename(str(path))
+                if filename_crc:
+                    status = "OK" if filename_crc == calculated_crc else "FAIL"
+                    status_style = "green" if status == "OK" else "red"
+                else:
+                    status = "No CRC"
+                    status_style = "yellow"
 
-    # Create mode validation
-    if create:
-        if not files:
-            ErrorHandler.create_requires_files()
-        if Path(create).suffix.lower() != '.sfv':
-            ErrorHandler.create_requires_sfv()
+                table.add_row(
+                    path.name,
+                    f"{path.stat().st_size}",
+                    f"[{status_style}]{status}[/{status_style}]",
+                    calculated_crc,
+                )
+            except ValueError as e:
+                table.add_row(path.name, "-", f"[red]{e}[/red]", "-")
+            progress.update(task, advance=1)
 
-    return value
+    console.print(table)
+
 
 @cli.command()
-@click.argument('files', nargs=-1, required=False, type=click.Path(exists=True))
-@click.option('-v', '--verify', type=click.Path(exists=True),
-              help='Verify SFV file',
-              callback=validate_sfv_params)
-@click.option('-c', '--create', type=click.Path(),
-              help='Create SFV file',
-              callback=validate_sfv_params)
-@click.option('-r', '--recurse', is_flag=True,
-              help='Run program recursively (only with --create)')
-def sfv(files: Tuple[str, ...], create: Optional[str], verify: Optional[str], recurse: bool) -> None:
-    """Handle SFV file operations.
+@click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("-r", "--recurse", is_flag=True, help="Process files recursively.")
+def append(paths: Tuple[str, ...], recurse: bool):
+    """Append CRC32 checksums to filenames."""
+    print_header("APPEND MODE")
+    file_paths = expand_and_filter_files(paths, recurse)
 
-    Create or verify SFV files. When creating, input files must be provided.
-    When verifying, only the SFV file is needed.
+    if not file_paths:
+        ErrorHandler.show_no_files_error()
 
-    Examples:
-    \b
-    Create SFV:  zencrc sfv -c checksums.sfv file1.txt file2.txt
-    Create SFV recursively:  zencrc sfv -c checksums.sfv . -r
-    Verify SFV:  zencrc sfv -v checksums.sfv
-    """
-    try:
-        if verify:
-            process_verify_sfv([verify])
-        elif create:
-            filelist = list(files)
-            if recurse:
-                filelist = expand_dirs(filelist)
-            filelist = [path for path in filelist if not Path(path).is_dir()]
-            if not filelist:
-                ErrorHandler.show_no_files_error()
-            process_create_sfv(create, filelist)
-    except Exception as e:
-        ErrorHandler.show_error(str(e))
+    process_files_with_progress(file_paths, crc32.append_to_filename, "[cyan]Appending CRC32...")
+    console.print(f"\n[bold blue]Processed {len(file_paths)} files.[/bold blue]")
 
 
-def main() -> None:
-    """Entry point for the CLI."""
+@cli.command()
+@click.option("-f", "--file", "sfv_file", required=True, type=click.Path(), help="SFV file to create or verify.")
+@click.argument("paths", nargs=-1, type=click.Path(exists=True))
+@click.option("-r", "--recurse", is_flag=True, help="Recursively add files to SFV.")
+def sfv(sfv_file: str, paths: Tuple[str, ...], recurse: bool):
+    """Create or verify SFV files."""
+    if paths:
+        print_header("CREATE SFV")
+        file_paths = expand_and_filter_files(paths, recurse)
+        if not file_paths:
+            ErrorHandler.show_no_files_error()
+
+        crc32.create_sfv_file(sfv_file, [str(p) for p in file_paths])
+        console.print(f"\n[bold green]Successfully created {sfv_file}[/bold green]")
+    else:
+        print_header("VERIFY SFV")
+        try:
+            results = crc32.verify_sfv_file(sfv_file)
+            table = Table(title=f"SFV Verification Results for {sfv_file}", show_header=True, header_style="bold magenta")
+            table.add_column("Filename", style="dim", width=40)
+            table.add_column("Status")
+            table.add_column("Expected CRC32")
+            table.add_column("Actual CRC32")
+
+            for result in results:
+                status = "[green]OK[/green]" if result['ok'] else "[red]FAIL[/red]"
+                table.add_row(
+                    result['file'],
+                    status,
+                    result['expected_crc'],
+                    result.get('actual_crc', '-'),
+                )
+            console.print(table)
+        except FileNotFoundError:
+            ErrorHandler.show_error(f"SFV file not found: {sfv_file}")
+        except IsADirectoryError:
+            ErrorHandler.show_error("SFV file cannot be a directory.")
+
+
+def main():
+    """CLI entry point."""
     cli()
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
